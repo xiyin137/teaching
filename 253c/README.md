@@ -9,7 +9,7 @@
 - `ising2d_analysis.png` — Analysis results
 - `ising2d_diagnostics.png` — Diagnostic plots
 
-*Created with [Claude Code](https://claude.ai/claude-code)*
+*Created with Claude Code*
 
 ## 3D SU(2) Yang-Mills
 
@@ -22,4 +22,4 @@
 - `latticeYM3d_analysis.png` — Glueball correlator fit and static quark potential
 - `latticeYM3d_errors.png` — Error analysis and autocorrelation diagnostics
 
-*Created with [Claude Code](https://claude.ai/claude-code)*
+*Created with Claude Code*
