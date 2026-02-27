@@ -19,3 +19,66 @@ __pycache__/
 venv/
 .venv/
 env/
+
+# Local test folder
+test/
+
+# Local tooling/cache directories
+.homebrew_cache/
+.homebrew_logs/
+.pip_cache/
+tools/sdpb/
+.claude/
+
+# Logs
+*.log
+logs/
+
+# Large binary artifacts (gitignore cannot filter by size directly)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.dmg
+*.iso
+*.pdf
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+
+# Local debug / handoff notes
+codex_to_claude.md
+agent.md
+claude_to_codex.md
+
+# ConformalBlocks generated outputs and diagnostics
+ConformalBlocks/__pycache__/
+ConformalBlocks/streamlined_output_2d/
+ConformalBlocks/streamlined_output_2d_wl/
+ConformalBlocks/streamlined_output_3d/
+ConformalBlocks/streamlined_output_main/
+ConformalBlocks/streamlined_output_main_wl/
+ConformalBlocks/_smoke/
+ConformalBlocks/_parity_*/
+ConformalBlocks/mySDP/
+ConformalBlocks/mySDP.ck/
+ConformalBlocks/mySDP_out/
+ConformalBlocks/mySDP.xml
+ConformalBlocks/_block_terms.wl
+ConformalBlocks/_block_components.wl
+ConformalBlocks/_casimir_diag*.wl
+ConformalBlocks/_cross_deriv_diag*.wl
+
+# Bootstrap generated run artifacts
+Bootstrap/ising3d/results/
+Bootstrap/ising3d_mixed/results/

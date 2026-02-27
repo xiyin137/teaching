@@ -1,0 +1,5 @@
+# Python dependencies for streamlined ConformalBlocks demos.
+# 2D/4D demos use mpmath directly; 3D demo imports vendored PyCFTBoot.
+mpmath>=1.3.0
+sympy>=1.12
+symengine>=0.13.0

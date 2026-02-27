@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Local shim for PyCFTBoot: ignore mpirun flags and run command directly.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|-np)
+      shift 2
+      ;;
+    --allow-run-as-root)
+      shift
+      ;;
+    --*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -eq 0 ]]; then
+  echo "mpirun shim: missing command" >&2
+  exit 2
+fi
+
+exec "$@"

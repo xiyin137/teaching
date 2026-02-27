@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+IMAGE="${SDPB_DOCKER_IMAGE:-bootstrapcollaboration/sdpb:master}"
+WORKDIR="${PWD}"
+
+exec docker run --rm \
+  -u "$(id -u):$(id -g)" \
+  -v "$WORKDIR:$WORKDIR" \
+  -w "$WORKDIR" \
+  "$IMAGE" \
+  sdpb "$@"

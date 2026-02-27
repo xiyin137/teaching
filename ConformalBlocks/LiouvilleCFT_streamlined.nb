@@ -1,0 +1,47 @@
+(* Content-type: application/vnd.wolfram.mathematica *)
+
+(*** Wolfram Notebook File ***)
+(* Streamlined rewrite: Liouville CFT correlator demo *)
+
+Notebook[{
+
+Cell["Liouville CFT (Streamlined)", "Title"],
+
+Cell["This notebook is a streamlined, commented rewrite inspired by the original Liouville CFT notebook.\nIt focuses on a minimal production workflow: setup -> special functions -> structure constants -> Virasoro block -> numeric integrand/correlator diagnostics.", "Text"],
+
+Cell["Load ConformalBlock.m (Ying-Hsuan Lin)", "Section"],
+
+Cell["cbPath = FileNameJoin[{NotebookDirectory[], \"ConformalBlock.m\"}];\nIf[! FileExistsQ[cbPath],\n  Print[\"ConformalBlock.m not found at: \" <> cbPath];\n  Abort[];\n];\nGet[cbPath];", "Input"],
+
+Cell["Global setup", "Section"],
+
+Cell["(* High precision for numerically delicate Upsilon/DOZZ evaluations. *)\nprec = 100;\nRationPrec[x_] := Rationalize[x, 10^-prec];\n\n(* Elliptic nome q(z) used by the q-expansion Virasoro block routines. *)\nnomeQ[z_] := Exp[-Pi EllipticK[1 - z]/EllipticK[z]];", "Input"],
+
+Cell["Liouville parameters", "Section"],
+
+Cell["(* c slightly shifted away from 25 avoids singular recursion denominators. *)\nc = RationPrec[25.00001];\n\n(* Solve for b from c = 1 + 6 (b + 1/b)^2 and choose a physical branch. *)\nbbSolutions = bb /. Solve[1 + 6 (bb + 1/bb)^2 == c, bb];\nb = RationPrec[N[bbSolutions[[4]]]];\nQ = RationPrec[b + 1/b];\n\n(* Liouville momentum p -> holomorphic weight h. *)\nLiouvilleWeight[p_] := Q^2/4 + p^2;", "Input"],
+
+Cell["Upsilon_b and DOZZ", "Section"],
+
+Cell["(* Upsilon_b(x) integral representation, matching conventions in the original notebook. *)\nUpsilonIntegrand[bb_, x_] := (1/t) * (\n  (1/4) Exp[-t] (1/bb + bb - 2 x)^2\n  - Exp[-t x] * ((1 - Exp[-t ((1/2) (1/bb + bb) - x)])^2)/((1 - Exp[-t/bb]) (1 - Exp[-bb t]))\n);\n\nUpsilon[bb_, x_] := Exp @ NIntegrate[\n  UpsilonIntegrand[bb, x],\n  {t, 0, Infinity},\n  Method -> {\"LevinRule\", TimeConstraint -> 1000},\n  MaxRecursion -> 1000\n];\n\n(* General-cc DOZZ without the overall Upsilon'_b(0) normalization constant. *)\nDOZZ[bb_, p1_, p2_, p3_] := (1/Upsilon[bb, (bb + 1/bb)/2 + I (p1 + p2 + p3)]) *\n  (Sqrt[Upsilon[bb, 2 I p1] Upsilon[bb, -2 I p1]] / Upsilon[bb, (bb + 1/bb)/2 + I (p1 + p2 + p3) - 2 I p1]) *\n  (Sqrt[Upsilon[bb, 2 I p2] Upsilon[bb, -2 I p2]] / Upsilon[bb, (bb + 1/bb)/2 + I (p1 + p2 + p3) - 2 I p2]) *\n  (Sqrt[Upsilon[bb, 2 I p3] Upsilon[bb, -2 I p3]] / Upsilon[bb, (bb + 1/bb)/2 + I (p1 + p2 + p3) - 2 I p3]);\n\n(* c=25 analytic form, useful benchmark/check. *)\nDOZZc25[p1_, p2_, p3_] := (1/Upsilon[1, 1 + I (p1 + p2 + p3)]) *\n  ((2 p1 Upsilon[1, 1 + 2 I p1]) / Upsilon[1, 1 + I (p1 + p2 + p3) - 2 I p1]) *\n  ((2 p2 Upsilon[1, 1 + 2 I p2]) / Upsilon[1, 1 + I (p1 + p2 + p3) - 2 I p2]) *\n  ((2 p3 Upsilon[1, 1 + 2 I p3]) / Upsilon[1, 1 + I (p1 + p2 + p3) - 2 I p3]);", "Input"],
+
+Cell["Virasoro block + Liouville integrand", "Section"],
+
+Cell["(* Wrapper around S4CBq from ConformalBlock.m. *)\nVirasoroBlock[{h1_, h2_, h3_, h4_}, hint_, z_, trunc_] :=\n  S4CBq[trunc, h1, h2, h3, h4, hint, c, z, nomeQ[z]];\n\n(* Integrand of the Liouville four-point decomposition. *)\nLiouvilleIntegrand[{np1_, np2_, np3_, np4_}, npint_, z_, trunc_] := Module[{p1, p2, p3, p4, pint},\n  {p1, p2, p3, p4, pint} = RationPrec /@ {np1, np2, np3, np4, npint};\n  (1/Pi) *\n    DOZZ[b, p1, p2, pint] *\n    DOZZ[b, p3, p4, pint] *\n    VirasoroBlock[{LiouvilleWeight[p1], LiouvilleWeight[p2], LiouvilleWeight[p3], LiouvilleWeight[p4]}, LiouvilleWeight[pint], z, trunc] *\n    VirasoroBlock[{LiouvilleWeight[p1], LiouvilleWeight[p2], LiouvilleWeight[p3], LiouvilleWeight[p4]}, LiouvilleWeight[pint], Conjugate[z], trunc]\n];", "Input"],
+
+Cell["Numerical correlator helper", "Section"],
+
+Cell["(* Tabulate integrand over internal momentum and integrate by interpolation. *)\nCorrelator[{p1_, p2_, p3_, p4_}, z_, pRange_, step_, trunc_] := Module[{grid, f},\n  grid = Table[{pint, LiouvilleIntegrand[{p1, p2, p3, p4}, pint, z, trunc]}, {pint, step, pRange, step}];\n  f = Interpolation[grid];\n  NIntegrate[f[y], {y, 0, pRange}]\n];\n\nSampleIntegrand[pExt_, z_, pRange_, step_, trunc_] :=\n  Table[{pint, LiouvilleIntegrand[pExt, pint, z, trunc]}, {pint, step, pRange, step}];", "Input"],
+
+Cell["Examples (lightweight defaults)", "Section"],
+
+Cell["(* Keep examples conservative; full-precision production runs can be expensive. *)\nsampleP = {0.3, 0.3, 0.3, 0.3};\nsampleZ = 0.8;\ntrunc = 5;\n\nintegrandData = SampleIntegrand[sampleP, sampleZ, 2, 0.1, trunc];\nListPlot[integrandData, Frame -> True, PlotRange -> All, PlotLabel -> \"Liouville integrand vs internal momentum\"];", "Input"],
+
+Cell["Optional full correlator evaluation", "Section"],
+
+Cell["(* Uncomment for a full correlator number (can take significant time):\ncorVal = Correlator[{0.3, 0.3, 0.3, 0.3}, 0.8, 2, 0.1, 5];\nPrint[corVal];\n*)", "Input"]
+
+},
+WindowSize->{1200, 900},
+StyleDefinitions->"Default.nb"
+]

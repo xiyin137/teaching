@@ -1,0 +1,10 @@
+{
+  "checkpointInterval": 1800,
+  "maxIterations": 50000,
+  "maxRuntime": 86400,
+  "dualityGapThreshold": 1e-12,
+  "primalErrorThreshold": 1e-40,
+  "dualErrorThreshold": 1e-30,
+  "minPrimalStep": 0,
+  "minDualStep": 0
+}
