@@ -1,16 +1,84 @@
 #!/usr/bin/env python3
 """3D Ising mixed-correlator island scan with PyCFTBoot + SDPB.
 
-This driver tests a rectangular grid in (Delta_sigma, Delta_epsilon) using the
-mixed-correlator setup from the standard 3D Ising bootstrap workflow:
-- one relevant Z2-odd scalar fixed at Delta_sigma,
-- first Z2-even scalar constrained to start at Delta_epsilon,
-- crossing + unitarity checked with SDPB feasibility (`iterate`).
+Background
+----------
+The single-correlator bootstrap (see Bootstrap/ising3d/) bounds operator
+dimensions by studying the four-point function <sigma sigma sigma sigma>.
+The mixed-correlator bootstrap goes further: it simultaneously imposes
+crossing symmetry on the system of four-point functions
 
-For each grid point, output status is:
-- `allowed`: feasibility found,
-- `excluded`: infeasible under the assumptions,
-- `error`: execution failed.
+    <sigma sigma sigma sigma>,   <sigma sigma epsilon epsilon>,
+    <epsilon epsilon epsilon epsilon>,
+
+where sigma (Z2-odd, dimension Delta_sigma) and epsilon (Z2-even, dimension
+Delta_epsilon) are the two relevant scalars of the 3D Ising CFT.
+
+Crossing + unitarity for this system yields a set of sum rules with
+7 independent channels:
+  - 5 matrix channels  (even spin, Z2-even exchange):
+      mat1..mat5 encode 2x2 matrix positivity conditions mixing the
+      <ss|ss>, <ss|ee>, <ee|ee> OPE data.
+  - 2 vector channels  (Z2-odd exchange):
+      vec_odd_even (even spin) and vec_odd_odd (odd spin) encode the
+      <se|se> crossing constraints.
+
+For a given (Delta_sigma, Delta_epsilon), the code checks whether the full
+system of sum rules is feasible (i.e., admits a solution consistent with
+unitarity). Points where it is feasible are "allowed"; points where no
+solution exists are "excluded". Scanning a grid of (Delta_sigma, Delta_epsilon)
+values maps out the famous "Ising island" -- a tiny allowed region that
+pins down the 3D Ising critical exponents with high precision.
+
+This driver
+-----------
+For each grid point (Delta_sigma, Delta_epsilon), the pipeline is:
+
+1. Build three ConformalBlockTable objects:
+   - base table (delta12=delta34=0): blocks for <OO|OO> with identical externals.
+   - mixed_table_a (delta12 = Delta_e - Delta_s, delta34 = Delta_s - Delta_e):
+     blocks for the <sigma epsilon|...> channel.
+   - mixed_table_b (delta12 = Delta_s - Delta_e, delta34 = Delta_s - Delta_e):
+     blocks for the <epsilon sigma|...> channel.
+
+2. Build 5 ConvolvedBlockTable objects from those block tables (the
+   crossing-derivative vectors F_{m,n} needed by the SDP).
+
+3. Construct the SDP with the 7-channel mixed vector_types and set:
+   - gap in Z2-even scalars >= Delta_epsilon,
+   - unitarity bound on Z2-odd scalars,
+   - a single relevant Z2-odd scalar pinned at Delta_sigma.
+
+4. Call iterate() to check feasibility via SDPB.
+
+Output classifies each point as:
+  - allowed:  feasibility found,
+  - excluded: infeasible under the assumptions,
+  - error:    execution failed.
+
+Usage
+-----
+  python3 ising3d_mixed_island_scan.py \\
+      --sigma-start 0.517 --sigma-end 0.521 --sigma-step 0.001 \\
+      --epsilon-start 1.410 --epsilon-end 1.435 --epsilon-step 0.005 \\
+      --out-dir results/test
+
+Parameter glossary
+------------------
+  sigma-start/end/step   scan range for Delta_sigma
+  epsilon-start/end/step scan range for Delta_epsilon
+  dim                    spacetime dimension (3)
+  k-max                  radial expansion truncation order
+  l-max                  maximum spin in block tables
+  m-max, n-max           number of z, zbar derivatives at the crossing point
+  cutoff                 PyCFTBoot pole-selection threshold (stable in [0.15, 0.20])
+  dual-error-threshold   SDPB convergence criterion for feasibility checks
+
+References
+----------
+  - Kos, Poland, Simmons-Duffin, 1406.4858 (PyCFTBoot algorithm)
+  - Kos, Poland, Simmons-Duffin, Vichi, 1603.04436 (mixed-correlator island)
+  - Simmons-Duffin, 1502.02033 (SDPB solver)
 """
 
 from __future__ import annotations
@@ -205,8 +273,29 @@ def sanitize_sdpb_options(bootstrap: Any, options: dict[str, Any]) -> dict[str, 
 
 
 def build_mixed_vector_types() -> list[list[Any]]:
-    """Construct mixed-correlator vector types for the 3D Ising Z2 system."""
-    # Matrix channel for Z2-even operators in even spin.
+    """Construct mixed-correlator vector types for the 3D Ising Z2 system.
+
+    The mixed system <ss|ss>, <ss|ee>, <ee|ee> (s=sigma, e=epsilon) has three
+    crossing-symmetry channels, each built from a different set of OPE data:
+
+    1. Z2-even exchange, even spin (matrix channel):
+       Operators appearing in both sigma x sigma and epsilon x epsilon OPEs.
+       The 5 matrices mat1..mat5 encode 2x2 positive-semidefinite constraints
+       mixing the ss and ee OPE coefficients. Each matrix entry is a 4-element
+       list [coefficient, convolved_table_index, parity_flag, extra_flag]
+       specifying which convolved block table contributes.
+
+    2. Z2-odd exchange, even spin (vector channel):
+       Operators in the sigma x epsilon OPE with even spin.
+
+    3. Z2-odd exchange, odd spin (vector channel):
+       Operators in the sigma x epsilon OPE with odd spin.
+
+    These match exactly the PyCFTBoot tutorial (tutorial.py, lines ~129-180).
+    """
+    # --- Matrix channels: Z2-even operators with even spin ---
+    # Each mat_i is a 2x2 matrix of [coeff, table_idx, parity, type] entries.
+    # The rows/columns index (sigma, epsilon) external pairs.
     mat1 = [[[1, 0, 0, 0], [0, 0, 0, 0]], [[0, 0, 0, 0], [0, 0, 0, 0]]]
     mat2 = [[[0, 0, 0, 0], [0, 0, 0, 0]], [[0, 0, 0, 0], [1, 0, 1, 1]]]
     mat3 = [[[0, 0, 0, 0], [0, 0, 0, 0]], [[0, 0, 0, 0], [0, 0, 0, 0]]]
@@ -214,24 +303,40 @@ def build_mixed_vector_types() -> list[list[Any]]:
     mat5 = [[[0, 1, 0, 0], [0.5, 1, 0, 1]], [[0.5, 1, 0, 1], [0, 1, 0, 0]]]
 
     vec_even_even = [mat1, mat2, mat3, mat4, mat5]
+
+    # --- Vector channels: Z2-odd operators ---
+    # Each entry is [coeff, table_idx, parity, type] for a single constraint row.
+    # vec_odd_even: even-spin Z2-odd (from sigma x epsilon OPE).
     vec_odd_even = [[0, 0, 0, 0], [0, 0, 0, 0], [1, 4, 1, 0], [1, 2, 0, 0], [-1, 3, 0, 0]]
+    # vec_odd_odd: odd-spin Z2-odd (from sigma x epsilon OPE).
     vec_odd_odd = [[0, 0, 0, 0], [0, 0, 0, 0], [1, 4, 1, 0], [-1, 2, 0, 0], [1, 3, 0, 0]]
 
     return [
-        [vec_even_even, 0, "z2-even-l-even"],
-        [vec_odd_even, 0, "z2-odd-l-even"],
-        [vec_odd_odd, 1, "z2-odd-l-odd"],
+        [vec_even_even, 0, "z2-even-l-even"],   # matrix channel, even spin
+        [vec_odd_even, 0, "z2-odd-l-even"],      # vector channel, even spin
+        [vec_odd_odd, 1, "z2-odd-l-odd"],         # vector channel, odd spin
     ]
 
 
 def build_convolved_tables(bootstrap: Any, tab_ref: Any, tab_mix_a: Any, tab_mix_b: Any) -> list[Any]:
-    """Build convolved block table list used by the mixed vector system."""
+    """Build the 5 convolved block tables used by the mixed vector system.
+
+    The convolution repackages raw conformal blocks into crossing-derivative
+    vectors F_{m,n}(Delta, ell). The 5 tables correspond to:
+      [0] ConvolvedBlockTable(base)              -- F- from <ss|ss> / <ee|ee>
+      [1] ConvolvedBlockTable(base, sym=True)    -- F+ from <ss|ss> / <ee|ee>
+      [2] ConvolvedBlockTable(mixed_a)           -- F- from <se|...>
+      [3] ConvolvedBlockTable(mixed_a, sym=True) -- F+ from <se|...>
+      [4] ConvolvedBlockTable(mixed_b)           -- from <es|...>
+
+    The vector_types matrices index into this list via their table_idx field.
+    """
     return [
-        bootstrap.ConvolvedBlockTable(tab_ref),
-        bootstrap.ConvolvedBlockTable(tab_ref, symmetric=True),
-        bootstrap.ConvolvedBlockTable(tab_mix_a),
-        bootstrap.ConvolvedBlockTable(tab_mix_a, symmetric=True),
-        bootstrap.ConvolvedBlockTable(tab_mix_b),
+        bootstrap.ConvolvedBlockTable(tab_ref),                   # index 0
+        bootstrap.ConvolvedBlockTable(tab_ref, symmetric=True),   # index 1
+        bootstrap.ConvolvedBlockTable(tab_mix_a),                 # index 2
+        bootstrap.ConvolvedBlockTable(tab_mix_a, symmetric=True), # index 3
+        bootstrap.ConvolvedBlockTable(tab_mix_b),                 # index 4
     ]
 
 
@@ -282,12 +387,22 @@ def run_point(
 
     try:
         with pushd(point_dir):
+            # Step 1: Compute the external dimension differences needed for
+            # mixed block tables. In the mixed system the external operators
+            # have unequal dimensions, so delta12 = Delta_1 - Delta_2 is nonzero.
             delta_es = delta_epsilon - delta_sigma
             delta_se = delta_sigma - delta_epsilon
 
+            # Step 2: Build three conformal block tables via Zamolodchikov-like
+            # radial recursion. This is the most compute-intensive step.
+            #
+            # base_table: identical externals (delta12=delta34=0), used for
+            #   <sigma sigma|O|sigma sigma> and <epsilon epsilon|O|epsilon epsilon>.
             base_table = bootstrap.ConformalBlockTable(
                 args.dim, args.k_max, args.l_max, args.m_max, args.n_max
             )
+            # mixed_table_a: blocks for <sigma epsilon|O|epsilon sigma> channel
+            #   with delta12 = Delta_e - Delta_s, delta34 = Delta_s - Delta_e.
             mixed_table_a = bootstrap.ConformalBlockTable(
                 args.dim,
                 args.k_max,
@@ -298,6 +413,8 @@ def run_point(
                 delta_se,
                 odd_spins=True,
             )
+            # mixed_table_b: blocks for <epsilon sigma|O|epsilon sigma> channel
+            #   with delta12 = delta34 = Delta_s - Delta_e.
             mixed_table_b = bootstrap.ConformalBlockTable(
                 args.dim,
                 args.k_max,
@@ -309,10 +426,14 @@ def run_point(
                 odd_spins=True,
             )
 
+            # Step 3: Convolve to get the crossing-derivative vectors F_{m,n}.
             convolved_tables = build_convolved_tables(
                 bootstrap, base_table, mixed_table_a, mixed_table_b
             )
 
+            # Step 4: Build the SDP. The mixed system passes a list
+            # [Delta_sigma, Delta_epsilon] as external dimensions, along with
+            # the 5 convolved tables and the 7-channel vector_types.
             sdp = bootstrap.SDP(
                 [delta_sigma, delta_epsilon],
                 convolved_tables,
@@ -324,10 +445,19 @@ def run_point(
             if args.dual_error_threshold is not None:
                 sdp.set_option("dualErrorThreshold", float(args.dual_error_threshold))
 
+            # Step 5: Set the physical assumptions for the 3D Ising model.
+            # - Gap in Z2-even scalars: no scalar below Delta_epsilon (the
+            #   identity is automatically excluded by PyCFTBoot).
             sdp.set_bound([0, "z2-even-l-even"], delta_epsilon)
+            # - Unitarity bound on Z2-odd scalars (dimension >= d/2 - 1 = dim
+            #   for scalars, but we use dim as a conservative placeholder).
             sdp.set_bound([0, "z2-odd-l-even"], float(args.dim))
+            # - Pin one relevant Z2-odd scalar at exactly Delta_sigma.
             sdp.add_point([0, "z2-odd-l-even"], delta_sigma)
 
+            # Step 6: Check feasibility. iterate() writes PMP XML, calls
+            # pmp2sdp, then sdpb. Returns True if the point is allowed
+            # (primal feasible) or False if excluded (dual feasible).
             allowed_value = bool(sdp.iterate(name=point_name))
     except Exception as exc:
         status = "error"
@@ -346,12 +476,19 @@ def run_point(
 
 
 def main() -> int:
-    """Run mixed-correlator island scan and write aggregate outputs."""
+    """Run mixed-correlator island scan and write aggregate outputs.
+
+    The main loop iterates over a rectangular grid in (Delta_sigma, Delta_epsilon)
+    space. At each point, it builds conformal block tables, constructs the mixed
+    SDP, and calls SDPB to check feasibility. Results are collected into CSV and
+    JSON files for downstream plotting with plot_ising3d_mixed_island.py.
+    """
     args = parse_args()
     validate_args(args)
     warn_cutoff_stability(args.cutoff)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Import the vendored PyCFTBoot library and configure executable paths.
     try:
         bootstrap = import_pycftboot()
     except Exception as exc:
@@ -367,11 +504,14 @@ def main() -> int:
     if args.mpirun_np:
         bootstrap.mpirun_np = int(args.mpirun_np)
 
+    # Set the PyCFTBoot cutoff parameter (pole-selection threshold for the
+    # Zamolodchikov recursion). Values outside [0.15, 0.20] may produce NaN.
     bootstrap.cutoff = args.cutoff
 
     sdpb_options = sanitize_sdpb_options(bootstrap, load_sdpb_options(args.sdpb_options))
     print_execution_context(args, bootstrap, sdpb_options)
 
+    # Build the scan grid.
     sigma_values = frange(args.sigma_start, args.sigma_end, args.sigma_step)
     epsilon_values = frange(args.epsilon_start, args.epsilon_end, args.epsilon_step)
 
@@ -387,9 +527,11 @@ def main() -> int:
         f"= {total_points} points"
     )
 
+    # Construct the 7-channel vector types once; deep-copied per SDP call.
     vector_types = build_mixed_vector_types()
     results: list[IslandPointResult] = []
 
+    # Main scan loop: iterate over all (Delta_sigma, Delta_epsilon) grid points.
     idx = 0
     for delta_sigma in sigma_values:
         for delta_epsilon in epsilon_values:
@@ -421,6 +563,7 @@ def main() -> int:
                     f"status=error error={result.error}"
                 )
 
+    # Write results to CSV (one row per grid point) and JSON (with full config).
     csv_path = args.out_dir / "scan_results.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(

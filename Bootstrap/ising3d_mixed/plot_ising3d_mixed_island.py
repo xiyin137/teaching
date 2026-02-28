@@ -1,5 +1,28 @@
 #!/usr/bin/env python3
-"""Plot mixed-correlator 3D Ising island scan results."""
+"""Plot mixed-correlator 3D Ising island scan results.
+
+Reads the scan_results.csv (and optionally scan_results.json) produced by
+ising3d_mixed_island_scan.py and generates a scatter plot of the
+(Delta_sigma, Delta_epsilon) grid, color-coded by feasibility:
+
+  - Green circles: allowed points (inside the island).
+  - Red crosses:   excluded points (outside the island).
+  - Green shading: convex envelope of allowed points.
+
+If scan_results.json is provided, the plot is annotated with the truncation
+parameters (k_max, l_max, etc.) for reproducibility.
+
+Usage
+-----
+  python3 plot_ising3d_mixed_island.py --csv results/scan_results.csv
+  python3 plot_ising3d_mixed_island.py --csv results/scan_results.csv \\
+      --json results/scan_results.json --out-prefix my_island
+
+Output
+------
+  <out-prefix>.png  and  <out-prefix>.pdf
+  Defaults to ising3d_mixed_island.{png,pdf} in the same directory as the CSV.
+"""
 
 from __future__ import annotations
 
@@ -50,12 +73,14 @@ def main() -> int:
     """Read scan results and create PNG/PDF island plots."""
     args = parse_args()
 
+    # Load the CSV produced by ising3d_mixed_island_scan.py.
     rows: list[dict[str, str]] = []
     with args.csv.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
             rows.append(row)
 
+    # Partition into allowed / excluded / error points.
     ok_rows = [r for r in rows if r.get("status") == "ok"]
     allowed_rows = [r for r in ok_rows if parse_bool(r.get("allowed", "")) is True]
     excluded_rows = [r for r in ok_rows if parse_bool(r.get("allowed", "")) is False]
@@ -63,6 +88,7 @@ def main() -> int:
     if not ok_rows:
         raise SystemExit("No successful points to plot (status=ok missing).")
 
+    # Optionally load JSON metadata for annotation (truncation parameters, etc.).
     metadata = None
     if args.json is not None and args.json.is_file():
         with args.json.open("r", encoding="utf-8") as handle:
@@ -112,7 +138,8 @@ def main() -> int:
             label=f"Allowed ({len(allowed_rows)})",
         )
 
-        # Draw a simple vertical-slice envelope from allowed points.
+        # Draw a vertical-slice envelope: for each sigma value, shade between
+        # the min and max allowed epsilon. This approximates the island boundary.
         by_sigma: dict[float, list[float]] = {}
         for sx, ey in zip(x_al, y_al):
             by_sigma.setdefault(sx, []).append(ey)

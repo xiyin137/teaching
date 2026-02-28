@@ -82,3 +82,11 @@ ConformalBlocks/_cross_deriv_diag*.wl
 # Bootstrap generated run artifacts
 Bootstrap/ising3d/results/
 Bootstrap/ising3d_mixed/results/
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_nobounds/
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_nobounds.ck/
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_nobounds.xml
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_nobounds_out/
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds/
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds.ck/
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds.xml
+Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds_out/
