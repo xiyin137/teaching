@@ -32,7 +32,9 @@ if [[ -z "${SLURM_SUBMIT_DIR:-}" ]]; then
   exit 1
 fi
 
-THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# In SLURM, BASH_SOURCE may point to a read-only spool copy of this script.
+# Always run from the submit directory (the project checkout path).
+THIS_DIR="${SLURM_SUBMIT_DIR}"
 cd "$THIS_DIR"
 mkdir -p logs
 
