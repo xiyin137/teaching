@@ -196,6 +196,17 @@ def warn_cutoff_stability(cutoff: float) -> None:
         )
 
 
+def _prepend_executable_parent_to_path(path_value: str | None) -> None:
+    """Prepend parent directory of an executable path to PATH if needed."""
+    if not path_value:
+        return
+    parent = str(Path(path_value).expanduser().resolve().parent)
+    current = os.environ.get("PATH", "")
+    entries = current.split(os.pathsep) if current else []
+    if parent not in entries:
+        os.environ["PATH"] = f"{parent}{os.pathsep}{current}" if current else parent
+
+
 def import_pycftboot() -> Any:
     """Import vendored PyCFTBoot module from local repository."""
     script_dir = Path(__file__).resolve().parent
@@ -487,6 +498,11 @@ def main() -> int:
     validate_args(args)
     warn_cutoff_stability(args.cutoff)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    # PyCFTBoot resolves sdpb/mpirun during module import via PATH lookup.
+    # Ensure user-provided overrides are visible before importing bootstrap.py.
+    _prepend_executable_parent_to_path(args.sdpb_path or os.environ.get("SDPB_PATH"))
+    _prepend_executable_parent_to_path(args.mpirun_path or os.environ.get("MPIRUN_PATH"))
 
     # Import the vendored PyCFTBoot library and configure executable paths.
     try:
