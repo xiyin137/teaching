@@ -12,6 +12,7 @@ export PYTHON_BIN="${PYTHON_BIN:-$HOME/.venvs/ising3d_mixed/bin/python3}"
 export SDPB_PATH="${SDPB_PATH:-$HOME/bin/sdpb_singularity/sdpb}"
 export MPIRUN_PATH="${MPIRUN_PATH:-$HOME/teaching/teaching/Bootstrap/ising3d/bin/mpirun}"
 export SDPB_SIF_IMAGE="${SDPB_SIF_IMAGE:-$HOME/software/sdpb_master.sif}"
+export EVEN_SCALAR_ASSUMPTION="${EVEN_SCALAR_ASSUMPTION:-isolated_epsilon}"
 
 export TEST_ROOT="${TEST_ROOT:-$HOME/ising3d_mixed_runs/mixed_equation_regression_k20_l20_m1_n6_c015}"
 mkdir -p "$TEST_ROOT/slurm_logs"
@@ -37,7 +38,7 @@ submit_pt () {
   local s="$1" e="$2" tag="$3"
   sbatch --partition=shared --time=03:00:00 \
     --output="$TEST_ROOT/slurm_logs/${tag}_%j.out" \
-    --export=ALL,VENV_ACTIVATE="$VENV_ACTIVATE",PYTHON_BIN="$PYTHON_BIN",SDPB_PATH="$SDPB_PATH",MPIRUN_PATH="$MPIRUN_PATH",SDPB_SIF_IMAGE="$SDPB_SIF_IMAGE",\
+    --export=ALL,VENV_ACTIVATE="$VENV_ACTIVATE",PYTHON_BIN="$PYTHON_BIN",SDPB_PATH="$SDPB_PATH",MPIRUN_PATH="$MPIRUN_PATH",SDPB_SIF_IMAGE="$SDPB_SIF_IMAGE",EVEN_SCALAR_ASSUMPTION="$EVEN_SCALAR_ASSUMPTION",\
 OUTPUT_ROOT="$TEST_ROOT",NAME_PREFIX="$tag",\
 SIGMA_START="$s",SIGMA_END="$s",SIGMA_STEP=0.0001,\
 EPSILON_START="$e",EPSILON_END="$e",EPSILON_STEP=0.0001,\

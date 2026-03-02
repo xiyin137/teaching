@@ -9,7 +9,7 @@ At each grid point `(Delta_sigma, Delta_epsilon)`, the code checks feasibility o
 crossing + unitarity under the assumptions:
 
 - one relevant `Z2`-odd scalar fixed at `Delta_sigma`,
-- first `Z2`-even scalar starts at `Delta_epsilon`,
+- configurable `Z2`-even scalar sector assumption (`tutorial` or `isolated_epsilon`),
 - mixed sum rule with even/odd sectors (matrix + vector channels).
 
 Output classifies each point as:
@@ -49,9 +49,14 @@ For each grid point, the scanner does:
 3. **SDP setup**
    - `SDP([Delta_sigma, Delta_epsilon], convolved_tables, vector_types=...)`.
    - Set assumptions:
-     - `set_bound([0, "z2-even-l-even"], Delta_epsilon)`
-     - `set_bound([0, "z2-odd-l-even"], dim)`
-     - `add_point([0, "z2-odd-l-even"], Delta_sigma)`
+     - `tutorial` mode (default):
+       `set_bound([0, "z2-even-l-even"], Delta_epsilon)`
+     - `isolated_epsilon` mode:
+       `set_bound([0, "z2-even-l-even"], dim)` +
+       `add_point([0, "z2-even-l-even"], Delta_epsilon)`
+     - always:
+       `set_bound([0, "z2-odd-l-even"], dim)` +
+       `add_point([0, "z2-odd-l-even"], Delta_sigma)`
 4. **SDPB call path**
    - `iterate(name=...)` makes PyCFTBoot write PMP/SDP artifacts,
      calls `pmp2sdp`, then calls `sdpb` (optionally via `mpirun`).
@@ -101,6 +106,9 @@ python3 collect_island_harvard_results.py --base-dir "$OUTPUT_ROOT" --plot
 ## Numerical notes
 
 - Locally validated stable cutoff range is `[0.15, 0.20]`.
+- `EVEN_SCALAR_ASSUMPTION=tutorial` matches PyCFTBoot tutorial conventions.
+- `EVEN_SCALAR_ASSUMPTION=isolated_epsilon` enforces an isolated epsilon plus
+  gap to the next `Z2`-even scalar at `dim`.
 - Defaults are tuned for mixed runs:
   - `k=25, l=20, m=2, n=6, cutoff=0.15`.
 - Production mixed feasibility checks use `dualErrorThreshold=1e-30` by default.

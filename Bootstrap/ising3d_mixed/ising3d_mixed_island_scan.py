@@ -45,7 +45,7 @@ For each grid point (Delta_sigma, Delta_epsilon), the pipeline is:
    crossing-derivative vectors F_{m,n} needed by the SDP).
 
 3. Construct the SDP with the 7-channel mixed vector_types and set:
-   - gap in Z2-even scalars >= Delta_epsilon,
+   - a Z2-even scalar assumption (tutorial or isolated-epsilon mode),
    - unitarity bound on Z2-odd scalars,
    - a single relevant Z2-odd scalar pinned at Delta_sigma.
 
@@ -73,6 +73,10 @@ Parameter glossary
   m-max, n-max           number of z, zbar derivatives at the crossing point
   cutoff                 PyCFTBoot pole-selection threshold (stable in [0.15, 0.20])
   dual-error-threshold   SDPB convergence criterion for feasibility checks
+  even-scalar-assumption
+                         tutorial: gap starts at Delta_epsilon
+                         isolated_epsilon: pin epsilon at Delta_epsilon and
+                         set remaining Z2-even scalar gap at dim
 
 References
 ----------
@@ -131,6 +135,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--m-max", type=int, default=2, help="m_max in block tables")
     parser.add_argument("--n-max", type=int, default=6, help="n_max in block tables")
     parser.add_argument("--cutoff", type=float, default=0.15, help="PyCFTBoot cutoff parameter")
+    parser.add_argument(
+        "--even-scalar-assumption",
+        type=str,
+        choices=("tutorial", "isolated_epsilon"),
+        default="tutorial",
+        help=(
+            "Z2-even spin-0 assumption: "
+            "'tutorial' sets gap>=Delta_epsilon; "
+            "'isolated_epsilon' pins epsilon at Delta_epsilon and sets "
+            "remaining Z2-even scalar gap>=dim."
+        ),
+    )
 
     parser.add_argument(
         "--dual-error-threshold",
@@ -361,7 +377,17 @@ def print_execution_context(args: argparse.Namespace, bootstrap: Any, sdpb_optio
     print("  Mixed tables: two additional ConformalBlockTable instances with nonzero delta12/delta34")
     print("Convolution and SDP:")
     print("  5 convolved tables -> SDP([Delta_sigma, Delta_epsilon], table_list, vector_types=...) ")
-    print("  iterate() with bounds: z2-even gap >= Delta_epsilon, single relevant z2-odd scalar at Delta_sigma")
+    if args.even_scalar_assumption == "tutorial":
+        print(
+            "  iterate() assumptions: z2-even scalar gap >= Delta_epsilon "
+            "(tutorial mode), single relevant z2-odd scalar at Delta_sigma"
+        )
+    else:
+        print(
+            "  iterate() assumptions: pin epsilon at Delta_epsilon and set "
+            "remaining z2-even scalar gap >= dim (isolated_epsilon mode), "
+            "single relevant z2-odd scalar at Delta_sigma"
+        )
     print("Executable chain:")
     print(f"  pmp2sdp from PATH -> {shutil.which('pmp2sdp') or 'NOT FOUND'}")
     print(f"  sdpb_path -> {getattr(bootstrap, 'sdpb_path', 'UNKNOWN')}")
@@ -456,14 +482,25 @@ def run_point(
             if args.dual_error_threshold is not None:
                 sdp.set_option("dualErrorThreshold", float(args.dual_error_threshold))
 
-            # Step 5: Set the physical assumptions for the 3D Ising model.
-            # - Gap in Z2-even scalars: no scalar below Delta_epsilon (the
-            #   identity is automatically excluded by PyCFTBoot).
-            sdp.set_bound([0, "z2-even-l-even"], delta_epsilon)
-            # - Unitarity bound on Z2-odd scalars (dimension >= d/2 - 1 = dim
-            #   for scalars, but we use dim as a conservative placeholder).
+            # Step 5: Set physical assumptions for the 3D Ising model.
+            #
+            # Z2-even sector:
+            # - tutorial mode: gap starts at Delta_epsilon (PyCFTBoot tutorial).
+            # - isolated_epsilon mode: pin epsilon at Delta_epsilon, then set
+            #   gap for remaining Z2-even scalars at dim.
+            if args.even_scalar_assumption == "tutorial":
+                sdp.set_bound([0, "z2-even-l-even"], delta_epsilon)
+            elif args.even_scalar_assumption == "isolated_epsilon":
+                sdp.set_bound([0, "z2-even-l-even"], float(args.dim))
+                sdp.add_point([0, "z2-even-l-even"], delta_epsilon)
+            else:
+                raise ValueError(
+                    "Unknown --even-scalar-assumption: "
+                    f"{args.even_scalar_assumption}"
+                )
+
+            # Z2-odd sector: unitarity gap + one pinned relevant scalar.
             sdp.set_bound([0, "z2-odd-l-even"], float(args.dim))
-            # - Pin one relevant Z2-odd scalar at exactly Delta_sigma.
             sdp.add_point([0, "z2-odd-l-even"], delta_sigma)
 
             # Step 6: Check feasibility. iterate() writes PMP XML, calls
@@ -619,6 +656,7 @@ def main() -> int:
                     "m_max": args.m_max,
                     "n_max": args.n_max,
                     "cutoff": args.cutoff,
+                    "even_scalar_assumption": args.even_scalar_assumption,
                     "dual_error_threshold": args.dual_error_threshold,
                     "name_prefix": args.name_prefix,
                 },

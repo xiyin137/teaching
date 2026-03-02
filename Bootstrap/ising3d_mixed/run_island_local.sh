@@ -72,6 +72,7 @@ cmd=(
   --m-max "${M_MAX:-2}"
   --n-max "${N_MAX:-6}"
   --cutoff "${CUTOFF:-0.15}"
+  --even-scalar-assumption "${EVEN_SCALAR_ASSUMPTION:-tutorial}"
   --dual-error-threshold "${DUAL_ERROR_THRESHOLD:-1e-30}"
   --max-points "${MAX_POINTS:-1200}"
   --name-prefix "${NAME_PREFIX:-ising3d_mixed}"
