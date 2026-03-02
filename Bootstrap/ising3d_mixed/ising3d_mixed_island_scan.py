@@ -162,8 +162,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--dim must be > 0")
     if args.k_max < 0 or args.l_max < 0 or args.m_max < 0 or args.n_max < 0:
         raise ValueError("k/l/m/n truncation parameters must be >= 0")
-    if not (0 < args.cutoff < 1):
-        raise ValueError("--cutoff must be in (0, 1)")
+    if not (0 <= args.cutoff < 1):
+        raise ValueError("--cutoff must be in [0, 1)")
     if args.max_points <= 0:
         raise ValueError("--max-points must be > 0")
 
