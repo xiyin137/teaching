@@ -37,8 +37,17 @@ ops_history = data['ops_history']  # Shape: (n_configs, n_operators, L)
 wilson_avg = data['wilson_avg']    # Shape: (R_max, T_max)
 L = int(data['L'])
 beta = float(data['beta'])
+GEVP_T0 = int(os.environ.get("YM_GEVP_T0", "0"))
+if GEVP_T0 < 0:
+    raise ValueError("YM_GEVP_T0 must be >= 0")
+FIT_T_START = int(os.environ.get("YM_FIT_T_START", "1"))
+FIT_T_END = int(os.environ.get("YM_FIT_T_END", "5"))  # exclusive upper bound
+USE_CONST_FLOOR = os.environ.get("YM_GEVP_CONST_FLOOR", "0").lower() not in ("0", "false", "no")
 
 print(f"Loaded Data: Beta={beta}, L={L}, Configs={ops_history.shape[0]}")
+print(f"GEVP reference time t0 = {GEVP_T0}")
+print(f"GEVP fit window: t=[{FIT_T_START}, {FIT_T_END - 1}]")
+print(f"GEVP fit model: {'cosh+const' if USE_CONST_FLOOR else 'cosh'}")
 
 # =============================================================================
 # GEVP ANALYSIS FOR GLUEBALL MASS
@@ -91,7 +100,9 @@ for t in range(1, Nt//2 + 1):
 # This is a generalized eigenvalue problem that optimally separates states
 # t0 is a reference time; t0=0 or t0=1 are common choices
 eig_vals = np.zeros((Nt//2, n_ops))
-t0_gevp = 0  # Reference time for GEVP
+t0_gevp = GEVP_T0  # Reference time for GEVP
+if t0_gevp >= Nt // 2:
+    raise ValueError(f"YM_GEVP_T0={t0_gevp} must be < Nt/2={Nt//2}")
 for t in range(Nt//2):
     try:
         # scipy.linalg.eigh solves A v = lambda B v for symmetric A, B
@@ -119,25 +130,57 @@ lambda_0 = eig_vals[:, 0]
 # =============================================================================
 
 def cosh_noise_model(t, A, m, C):
-    """Cosh correlator with noise floor for fitting."""
+    """Cosh correlator with additive constant floor."""
     return A * np.cosh(m * (t - Nt/2.0)) + C
 
+def cosh_model(t, A, m):
+    """Pure cosh correlator for fitting."""
+    return A * np.cosh(m * (t - Nt/2.0))
+
 # Fit range: exclude t=0 (contact terms) and large t (noise dominated)
-t_start = 1
-t_end = 5
+t_start = FIT_T_START
+t_end = FIT_T_END
+if t_start < 1:
+    raise ValueError("YM_FIT_T_START must be >= 1")
+if t_end <= t_start + 1:
+    raise ValueError("YM_FIT_T_END must be at least YM_FIT_T_START + 2")
+if t_end > Nt // 2:
+    raise ValueError(f"YM_FIT_T_END must be <= Nt/2={Nt//2}")
 
 t_data = np.arange(Nt//2)
 y_data = lambda_0
 
 fit_success = False
 popt = None
+fit_model = None
 try:
-    # Fit with bounds: A>0, 0<m<5, 0<C<1
-    popt, pcov = curve_fit(cosh_noise_model,
-                           t_data[t_start:t_end],
-                           y_data[t_start:t_end],
-                           p0=[y_data[1], 1.0, 0.01],
-                           bounds=([0, 0, 0], [np.inf, 5.0, 1.0]))
+    fit_mask = np.isfinite(y_data[t_start:t_end]) & (y_data[t_start:t_end] > 0)
+    x_fit_data = t_data[t_start:t_end][fit_mask]
+    y_fit_data = y_data[t_start:t_end][fit_mask]
+    if len(y_fit_data) < 3:
+        raise RuntimeError("Insufficient positive finite GEVP points in fit window")
+
+    if USE_CONST_FLOOR:
+        # Fit with bounds: A>0, 0<m<5, free constant C
+        fit_model = cosh_noise_model
+        popt, pcov = curve_fit(
+            fit_model,
+            x_fit_data,
+            y_fit_data,
+            p0=[y_fit_data[0], 1.0, 0.0],
+            bounds=([0.0, 0.0, -np.inf], [np.inf, 5.0, np.inf]),
+        )
+    else:
+        # Pure-cosh fit is often visually cleaner for principal correlators.
+        fit_model = cosh_model
+        popt, pcov = curve_fit(
+            fit_model,
+            x_fit_data,
+            y_fit_data,
+            p0=[y_fit_data[0], 1.0],
+            bounds=([0.0, 0.0], [np.inf, 5.0]),
+        )
+
     mass_est = popt[1]
     mass_err = np.sqrt(pcov[1,1])  # Error from covariance matrix
     fit_success = True
@@ -208,12 +251,30 @@ plt.figure(figsize=(12, 5))
 # Left panel: Correlator and fit
 plt.subplot(1, 2, 1)
 plt.plot(t_data, y_data, 'bo', label='Data')
+plt.axvspan(t_start, t_end - 1, color='orange', alpha=0.12, label='Fit window')
 if fit_success:
-    fit_x = np.linspace(0, Nt//2, 100)
-    plt.plot(fit_x, cosh_noise_model(fit_x, *popt), 'r-', label=f'Fit: $m_G a$ = {mass_est:.3f}')
+    # Show solid fit only on the chosen fit window; dashed outside as extrapolation.
+    fit_x = np.linspace(t_start, t_end - 1, 100)
+    fit_y = fit_model(fit_x, *popt)
+    plt.plot(fit_x, fit_y, 'r-', label=f'Fit: $m_G a$ = {mass_est:.3f}')
+    fit_x_extrap = np.linspace(0, Nt//2, 200)
+    fit_y_extrap = fit_model(fit_x_extrap, *popt)
+    plt.plot(fit_x_extrap, fit_y_extrap, 'r--', alpha=0.4, label='Fit extrapolation')
 plt.yscale('log')
-plt.ylim(1e-3, 2.0)
-plt.title(f'GEVP Correlator (Fit Range: t=[{t_start}, {t_end}])')
+# Auto-scale y-limits on log scale to avoid clipping low/high points.
+positive_vals = y_data[np.isfinite(y_data) & (y_data > 0)]
+if fit_success:
+    positive_fit = fit_y[np.isfinite(fit_y) & (fit_y > 0)]
+    if positive_fit.size:
+        positive_vals = np.concatenate([positive_vals, positive_fit])
+if positive_vals.size:
+    y_min = np.min(positive_vals)
+    y_max = np.max(positive_vals)
+    if y_max > y_min:
+        plt.ylim(y_min / 2.0, y_max * 1.3)
+    else:
+        plt.ylim(y_min / 2.0, y_max * 2.0)
+plt.title(f'GEVP Correlator (t0={t0_gevp}, Fit Range: t=[{t_start}, {t_end - 1}])')
 plt.xlabel('t/a (lattice units)')
 plt.ylabel(r'$\lambda_0(t)$')
 plt.legend()

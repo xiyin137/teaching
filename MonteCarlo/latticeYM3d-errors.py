@@ -11,8 +11,8 @@ import os
 # This script performs rigorous statistical error analysis:
 #   1. Autocorrelation analysis - check if measurements are independent
 #   2. Binning analysis - see how errors scale with bin size
-#   3. Resampling (Efron's bootstrap) - non-parametric error estimation
-#   4. Jackknife resampling - bias-corrected error estimation
+#   3. Block bootstrap - non-parametric error estimation for correlated data
+#   4. Block jackknife - bias/error estimates for correlated data
 #
 # WHY ERROR ANALYSIS MATTERS:
 # Monte Carlo measurements are correlated - successive configurations differ
@@ -39,12 +39,21 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(script_dir, 'lattice_data_3d.npz')
 data = np.load(data_path)
 ops_history = data['ops_history']
-wilson_avg = data['wilson_avg']
+wilson_history = data['wilson_history'] if 'wilson_history' in data.files else None
+wilson_avg = np.mean(wilson_history, axis=0) if wilson_history is not None else data['wilson_avg']
 L = int(data['L'])
 beta = float(data['beta'])
+GEVP_T0 = int(os.environ.get("YM_GEVP_T0", "0"))
+if GEVP_T0 < 0:
+    raise ValueError("YM_GEVP_T0 must be >= 0")
 
 n_meas, n_ops, Nt = ops_history.shape
 print(f"Loaded Data: Beta={beta}, L={L}, Configs={n_meas}")
+print(f"GEVP reference time t0 = {GEVP_T0}")
+if wilson_history is None:
+    print("Note: wilson_history not found; string-tension uncertainty will be approximate.")
+
+rng = np.random.default_rng(12345)
 
 # =============================================================================
 # 1. AUTOCORRELATION ANALYSIS
@@ -141,108 +150,89 @@ print(f"Plateau error (bin={bin_sizes[-1]}): {bin_errors[-1]:.6f}")
 print(f"Error inflation factor: {bin_errors[-1]/naive_error:.2f}x")
 
 # =============================================================================
-# 3. RESAMPLING ERROR ESTIMATION (Efron's bootstrap)
+# 3. BLOCK RESAMPLING FOR CORRELATED DATA
 # =============================================================================
-# Note: This is statistical resampling, not to be confused with the
-# conformal bootstrap which uses crossing symmetry constraints in CFTs.
-#
-# CAVEAT FOR CORRELATED DATA:
-# Standard resampling assumes independent samples. For correlated Monte Carlo
-# data, it can underestimate errors (similar to the naive error). Solutions:
-#   1. Use block resampling (resample blocks of consecutive measurements)
-#   2. Thin the data first (use only every tau_int-th measurement)
-#   3. Compare with binning analysis to verify consistency
-# Here we use standard resampling but rely on n_skip being large enough
-# that measurements are approximately independent.
+# Standard iid bootstrap/jackknife underestimate uncertainties for Markov chains.
+# We use block resampling with block size set by the measured autocorrelation.
 
-def resampling_error(x, n_samples=1000, estimator=np.mean):
-    """
-    Resampling method for error estimation (Efron 1979).
+def _make_blocks(n, block_size):
+    n_blocks = n // block_size
+    trimmed = n_blocks * block_size
+    if n_blocks < 2:
+        return None, 0
+    blocks = np.arange(trimmed).reshape(n_blocks, block_size)
+    return blocks, trimmed
 
-    Resample with replacement N times, compute statistic on each sample.
-    Error is the standard deviation of the resampled distribution.
+def block_bootstrap_indices(n, block_size):
+    blocks, _ = _make_blocks(n, block_size)
+    if blocks is None:
+        return np.arange(n)
+    n_blocks = blocks.shape[0]
+    pick = rng.integers(0, n_blocks, size=n_blocks)
+    return blocks[pick].reshape(-1)
 
-    Works for any estimator (mean, median, fitted parameters, etc.)
-    """
-    n = len(x)
-    resampled_values = np.zeros(n_samples)
-
+def block_bootstrap_stat(x, block_size, n_samples=1000, estimator=np.mean):
+    vals = np.zeros(n_samples)
     for i in range(n_samples):
-        # Resample with replacement
-        idx = np.random.randint(0, n, size=n)
-        resampled_values[i] = estimator(x[idx])
+        idx = block_bootstrap_indices(len(x), block_size)
+        vals[i] = estimator(x[idx])
+    return np.mean(vals), np.std(vals, ddof=1), vals
 
-    return np.mean(resampled_values), np.std(resampled_values, ddof=1)
+def block_jackknife_stat(x, block_size, estimator=np.mean):
+    blocks, trimmed = _make_blocks(len(x), block_size)
+    if blocks is None:
+        full = estimator(x)
+        return full, np.nan, np.nan
 
-# Resampling estimate of the mean plaquette
-resamp_mean, resamp_err = resampling_error(plaq_timeseries, n_samples=1000)
-print(f"\n--- RESAMPLING ANALYSIS ---")
-print(f"Mean plaquette: {resamp_mean:.6f} +/- {resamp_err:.6f}")
+    x_trim = x[:trimmed]
+    n_blocks = blocks.shape[0]
+    jk_vals = np.zeros(n_blocks)
 
-# =============================================================================
-# 4. JACKKNIFE ERROR ESTIMATION
-# =============================================================================
+    for i in range(n_blocks):
+        mask = np.ones(trimmed, dtype=bool)
+        mask[i * block_size:(i + 1) * block_size] = False
+        jk_vals[i] = estimator(x_trim[mask])
 
-def jackknife_error(x, estimator=np.mean):
-    """
-    Jackknife resampling for error estimation.
-
-    Leave-one-out: compute statistic on each subset with one sample removed.
-    Error is sqrt((n-1) * variance of jackknife values).
-
-    Jackknife is particularly good for bias estimation and correction.
-    """
-    n = len(x)
-    jackknife_values = np.zeros(n)
-
-    for i in range(n):
-        # Leave out sample i
-        subset = np.concatenate([x[:i], x[i+1:]])
-        jackknife_values[i] = estimator(subset)
-
-    mean_jk = np.mean(jackknife_values)
-    # Jackknife error formula
-    err_jk = np.sqrt((n-1) * np.var(jackknife_values, ddof=0))
-
-    # Bias estimation
-    full_estimate = estimator(x)
-    bias = (n-1) * (mean_jk - full_estimate)
-
+    mean_jk = np.mean(jk_vals)
+    err_jk = np.sqrt((n_blocks - 1) * np.var(jk_vals, ddof=0))
+    full_est = estimator(x_trim)
+    bias = (n_blocks - 1) * (mean_jk - full_est)
     return mean_jk, err_jk, bias
 
-jk_mean, jk_err, jk_bias = jackknife_error(plaq_timeseries)
-print(f"\n--- JACKKNIFE ANALYSIS ---")
+block_size = max(1, int(np.ceil(2.0 * tau_int)))
+if n_meas // block_size < 4:
+    block_size = max(1, n_meas // 4)
+
+print(f"\n--- BLOCK RESAMPLING SETUP ---")
+print(f"Block size: {block_size} measurements")
+print(f"Number of blocks: {max(1, n_meas // max(1, block_size))}")
+
+resamp_mean, resamp_err, _ = block_bootstrap_stat(plaq_timeseries, block_size, n_samples=1000)
+print(f"\n--- BLOCK BOOTSTRAP ANALYSIS ---")
+print(f"Mean plaquette: {resamp_mean:.6f} +/- {resamp_err:.6f}")
+
+jk_mean, jk_err, jk_bias = block_jackknife_stat(plaq_timeseries, block_size)
+print(f"\n--- BLOCK JACKKNIFE ANALYSIS ---")
 print(f"Mean plaquette: {jk_mean:.6f} +/- {jk_err:.6f}")
 print(f"Estimated bias: {jk_bias:.2e}")
 
 # =============================================================================
-# 5. GEVP WITH RESAMPLING ERRORS
+# 4. GEVP MASS WITH BLOCK BOOTSTRAP
 # =============================================================================
-#
-# For complex derived quantities like the glueball mass (which involves
-# building a correlation matrix, solving a generalized eigenvalue problem,
-# and extracting a mass from the eigenvalue decay), analytic error propagation
-# is impractical. Resampling provides a straightforward solution:
-#
-#   1. Resample the raw configurations with replacement
-#   2. For each resampled ensemble, compute the full analysis pipeline
-#   3. The spread of results gives the statistical error
-#
-# This automatically accounts for all correlations in the analysis chain.
 
 def build_correlator_matrix(ops_history):
     """Build the GEVP correlation matrix C(t)."""
-    n_meas, n_ops, Nt = ops_history.shape
+    n_meas_loc, n_ops_loc, Nt_loc = ops_history.shape
 
     # Subtract VEV
     vevs = np.mean(ops_history, axis=(0, 2))
     ops_sub = ops_history - vevs[None, :, None]
 
     # Build C(t)
-    C_matrix = np.zeros((Nt, n_ops, n_ops))
-    for t in range(Nt):
-        for i in range(n_ops):
-            for j in range(n_ops):
+    C_matrix = np.zeros((Nt_loc, n_ops_loc, n_ops_loc))
+    for t in range(Nt_loc):
+        for i in range(n_ops_loc):
+            for j in range(n_ops_loc):
                 prod = ops_sub[:, i, :] * np.roll(ops_sub[:, j, :], -t, axis=1)
                 C_matrix[t, i, j] = np.mean(prod)
 
@@ -250,120 +240,124 @@ def build_correlator_matrix(ops_history):
     C_matrix = 0.5 * (C_matrix + np.transpose(C_matrix, (0, 2, 1)))
 
     # Fold
-    for t in range(1, Nt//2 + 1):
-        C_matrix[t] = 0.5 * (C_matrix[t] + C_matrix[Nt-t])
+    for t in range(1, Nt_loc // 2 + 1):
+        C_matrix[t] = 0.5 * (C_matrix[t] + C_matrix[Nt_loc - t])
 
-    return C_matrix[:Nt//2]
+    return C_matrix[: Nt_loc // 2]
 
 def extract_mass_from_correlator(C_matrix):
-    """Extract ground state mass from GEVP."""
-    Nt_half, n_ops, _ = C_matrix.shape
+    """Extract ground-state effective mass from GEVP eigenvalue ratio."""
+    Nt_half, n_ops_loc, _ = C_matrix.shape
 
-    # Solve GEVP
-    eig_vals = np.zeros((Nt_half, n_ops))
-    t0 = 1  # Use t0=1 to avoid contact terms
+    eig_vals = np.zeros((Nt_half, n_ops_loc))
+    t0 = GEVP_T0
+    if Nt_half <= t0:
+        return np.nan
 
     for t in range(Nt_half):
         try:
             evals = la.eigh(C_matrix[t], C_matrix[t0], eigvals_only=True)
             eig_vals[t, :] = np.sort(evals)[::-1]
-        except:
+        except (np.linalg.LinAlgError, ValueError):
             eig_vals[t, :] = np.nan
 
     lambda_0 = eig_vals[:, 0]
-
-    # Effective mass from ratio: m_eff(t) = log(C(t)/C(t+1))
     with np.errstate(divide='ignore', invalid='ignore'):
         m_eff = np.log(lambda_0[:-1] / lambda_0[1:])
 
-    # Return effective mass at t=2 (after contact term effects)
     if len(m_eff) > 2 and np.isfinite(m_eff[2]):
         return m_eff[2]
     return np.nan
 
-def resampling_gevp_mass(ops_history, n_samples=200):
-    """Resampling error for GEVP mass extraction."""
-    n_meas = ops_history.shape[0]
-    mass_samples = []
-
-    for _ in range(n_samples):
-        # Resample configurations
-        idx = np.random.randint(0, n_meas, size=n_meas)
-        ops_resamp = ops_history[idx]
-
-        # Build correlator and extract mass
-        C = build_correlator_matrix(ops_resamp)
-        m = extract_mass_from_correlator(C)
-        if np.isfinite(m):
-            mass_samples.append(m)
-
-    if len(mass_samples) > 10:
-        return np.mean(mass_samples), np.std(mass_samples, ddof=1)
-    return np.nan, np.nan
-
-print(f"\n--- GEVP MASS WITH RESAMPLING ERRORS ---")
-print("Running resampling (this may take a moment)...")
-mass_resamp, mass_err_resamp = resampling_gevp_mass(ops_history, n_samples=200)
-print(f"Glueball mass: {mass_resamp:.4f} +/- {mass_err_resamp:.4f}")
-
-# =============================================================================
-# 6. STRING TENSION AND DIMENSIONLESS RATIO
-# =============================================================================
-#
-# The string tension sigma sets the characteristic scale of the confining theory.
-# It can be extracted from Wilson loops: W(R,T) ~ exp(-V(R)*T) where
-# V(R) = sigma*R + const for large R (linear confinement).
-#
-# The dimensionless ratio m_G/sqrt(sigma) is a universal prediction:
-# - Independent of the lattice spacing (both m_G and sqrt(sigma) have dim [1/length])
-# - Can be compared to continuum extrapolations and other methods
-# - For 3D SU(2) Yang-Mills 0++ glueball: m_G/sqrt(sigma) ~ 4-5
-#
-# NOTE: We extract sigma from wilson_avg which is already averaged over all
-# configurations. A proper resampling analysis of sigma would require storing
-# Wilson loops per-configuration, which we don't do here for simplicity.
-
-def extract_string_tension(wilson_avg):
+def extract_string_tension(wilson_mean):
     """Extract string tension from Wilson loop data."""
-    R_max = wilson_avg.shape[0]
-    V_R = np.zeros(R_max)
-    V_R[:] = np.nan
+    R_max = wilson_mean.shape[0]
+    V_R = np.full(R_max, np.nan)
 
     # Extract V(R) from Wilson loop ratios at T=3,4
     for r in range(R_max):
-        if wilson_avg[r, 3] > 0 and wilson_avg[r, 4] > 0:
-            V_R[r] = np.log(wilson_avg[r, 3] / wilson_avg[r, 4])
+        if wilson_mean[r, 3] > 0 and wilson_mean[r, 4] > 0:
+            V_R[r] = np.log(wilson_mean[r, 3] / wilson_mean[r, 4])
 
     # Fit V(R) = sigma * R + const for R >= 2
-    r_vals = np.arange(1, R_max+1)
+    r_vals = np.arange(1, R_max + 1)
     mask = np.isfinite(V_R) & (r_vals >= 2)
     if np.sum(mask) >= 2:
         try:
-            popt, _ = curve_fit(lambda r, s, c: s*r + c, r_vals[mask], V_R[mask])
-            return popt[0]  # sigma
-        except:
-            pass
+            popt, _ = curve_fit(lambda r, s, c: s * r + c, r_vals[mask], V_R[mask])
+            return popt[0]
+        except (RuntimeError, ValueError):
+            return np.nan
     return np.nan
 
-# Get string tension from full data
+def block_bootstrap_physics(ops_history, wilson_history, block_size, n_samples=200):
+    mass_samples = []
+    sigma_samples = []
+    ratio_samples = []
+    n_cfg = ops_history.shape[0]
+
+    for _ in range(n_samples):
+        idx = block_bootstrap_indices(n_cfg, block_size)
+        ops_resamp = ops_history[idx]
+
+        mass = extract_mass_from_correlator(build_correlator_matrix(ops_resamp))
+        if np.isfinite(mass):
+            mass_samples.append(mass)
+
+        sigma = np.nan
+        if wilson_history is not None:
+            wilson_mean = np.mean(wilson_history[idx], axis=0)
+            sigma = extract_string_tension(wilson_mean)
+            if np.isfinite(sigma):
+                sigma_samples.append(sigma)
+
+        if np.isfinite(mass) and np.isfinite(sigma) and sigma > 0:
+            ratio_samples.append(mass / np.sqrt(sigma))
+
+    return np.array(mass_samples), np.array(sigma_samples), np.array(ratio_samples)
+
+print(f"\n--- GEVP MASS + STRING TENSION WITH BLOCK BOOTSTRAP ---")
+print("Running block bootstrap (this may take a moment)...")
+
+mass_samples, sigma_samples, ratio_samples = block_bootstrap_physics(
+    ops_history, wilson_history, block_size, n_samples=200
+)
+
+mass_resamp = np.mean(mass_samples) if len(mass_samples) > 10 else np.nan
+mass_err_resamp = np.std(mass_samples, ddof=1) if len(mass_samples) > 10 else np.nan
+print(f"Glueball mass: {mass_resamp:.4f} +/- {mass_err_resamp:.4f}")
+
+# =============================================================================
+# 5. STRING TENSION AND DIMENSIONLESS RATIO
+# =============================================================================
+
 sigma = extract_string_tension(wilson_avg)
 print(f"\n--- STRING TENSION ---")
 print(f"String tension (sigma*a^2): {sigma:.4f}")
 
-# Compute dimensionless ratio m_G / sqrt(sigma)
-if not np.isnan(sigma) and sigma > 0 and not np.isnan(mass_resamp):
-    ratio = mass_resamp / np.sqrt(sigma)
-    # Error propagation: d(m/sqrt(s)) = dm/sqrt(s) (ignoring sigma error for now)
-    ratio_err = mass_err_resamp / np.sqrt(sigma)
+if len(sigma_samples) > 10:
+    sigma_err = np.std(sigma_samples, ddof=1)
+else:
+    sigma_err = np.nan
+
+if len(ratio_samples) > 10:
+    ratio = np.mean(ratio_samples)
+    ratio_err = np.std(ratio_samples, ddof=1)
     print(f"\n--- DIMENSIONLESS RATIO ---")
     print(f"m_G / sqrt(sigma): {ratio:.4f} +/- {ratio_err:.4f}")
+    print(f"(Expected for 3D SU(2) 0++ glueball: ~4-5)")
+elif np.isfinite(sigma) and sigma > 0 and np.isfinite(mass_resamp):
+    ratio = mass_resamp / np.sqrt(sigma)
+    ratio_err = mass_err_resamp / np.sqrt(sigma)
+    print(f"\n--- DIMENSIONLESS RATIO ---")
+    print(f"m_G / sqrt(sigma): {ratio:.4f} +/- {ratio_err:.4f} (sigma error unavailable)")
     print(f"(Expected for 3D SU(2) 0++ glueball: ~4-5)")
 else:
     ratio = np.nan
     ratio_err = np.nan
 
 # =============================================================================
-# 7. PLOTTING
+# 6. PLOTTING
 # =============================================================================
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -395,7 +389,7 @@ ax2.grid(True, alpha=0.3)
 
 # Plot 3: Time series with running mean
 ax3 = axes[1, 0]
-window_size = 50
+window_size = min(50, max(1, n_meas))
 running_mean = np.convolve(plaq_timeseries, np.ones(window_size)/window_size, mode='valid')
 ax3.plot(plaq_timeseries, 'b-', alpha=0.3, lw=0.5, label='Raw data')
 ax3.plot(np.arange(window_size-1, n_meas), running_mean, 'r-', lw=1, label=f'Running mean (w={window_size})')
@@ -408,7 +402,7 @@ ax3.grid(True, alpha=0.3)
 
 # Plot 4: Error comparison
 ax4 = axes[1, 1]
-methods = ['Naive', 'Binned', 'Resampling', 'Jackknife']
+methods = ['Naive', 'Binned', 'Block BS', 'Block JK']
 errors = [naive_error, bin_errors[-1], resamp_err, jk_err]
 colors = ['blue', 'green', 'orange', 'red']
 bars = ax4.bar(methods, errors, color=colors, alpha=0.7, edgecolor='black')
@@ -418,8 +412,10 @@ ax4.grid(True, alpha=0.3, axis='y')
 
 # Add value labels on bars
 for bar, err in zip(bars, errors):
-    ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.0001,
-             f'{err:.5f}', ha='center', va='bottom', fontsize=9)
+    label = f'{err:.5f}' if np.isfinite(err) else 'nan'
+    y_text = bar.get_height() + 0.0001 if np.isfinite(bar.get_height()) else 0.0
+    ax4.text(bar.get_x() + bar.get_width()/2, y_text,
+             label, ha='center', va='bottom', fontsize=9)
 
 plt.tight_layout()
 
@@ -441,10 +437,13 @@ print(f"Effective independent samples: {n_meas / (2*tau_int):.1f}")
 print(f"\nPlaquette mean: {np.mean(plaq_timeseries):.6f}")
 print(f"  Naive error:     {naive_error:.6f}")
 print(f"  Binned error:    {bin_errors[-1]:.6f}")
-print(f"  Resampling error: {resamp_err:.6f}")
-print(f"  Jackknife error: {jk_err:.6f}")
-print(f"\nGlueball mass (resampling): {mass_resamp:.4f} +/- {mass_err_resamp:.4f}")
-print(f"String tension (sigma*a^2): {sigma:.4f}")
+print(f"  Block BS error:  {resamp_err:.6f}")
+print(f"  Block JK error:  {jk_err:.6f}")
+print(f"\nGlueball mass (block BS): {mass_resamp:.4f} +/- {mass_err_resamp:.4f}")
+if np.isfinite(sigma_err):
+    print(f"String tension (sigma*a^2): {sigma:.4f} +/- {sigma_err:.4f}")
+else:
+    print(f"String tension (sigma*a^2): {sigma:.4f}")
 if not np.isnan(ratio):
     print(f"m_G / sqrt(sigma): {ratio:.4f} +/- {ratio_err:.4f}")
 print("="*60)

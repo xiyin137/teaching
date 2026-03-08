@@ -1,5 +1,4 @@
 import numpy as np
-import scipy.linalg as la
 import time
 import os
 from multiprocessing import Pool, cpu_count
@@ -124,7 +123,8 @@ def random_SU2_updates(shape, epsilon):
     - Optimal: ~50-70% acceptance rate. epsilon=0.3 typically works well.
     """
     r = np.random.uniform(-0.5, 0.5, shape + (4,))
-    r[..., 0] = np.sign(r[..., 0]) * np.sqrt(1 - epsilon**2)
+    # Keep proposals centered near +I; random sign would place half near -I.
+    r[..., 0] = np.sqrt(1 - epsilon**2)
     r[..., 1:] *= epsilon
     norm = np.linalg.norm(r, axis=-1, keepdims=True)
     r = r / norm
@@ -214,30 +214,36 @@ def update_metropolis(U):
     We sweep through all links in all directions to ensure ergodicity
     (any configuration can be reached from any other in finite steps).
     """
-    # Generate random SU(2) matrices for proposals
-    R = random_SU2_updates((L, L, L, 3), epsilon=epsilon_met)
-    U_prime = R @ U  # Proposed new links: U'_mu = R * U_mu
+    # Build checkerboard sublattices from the current L at call time.
+    parity_mask = (
+        np.arange(L)[:, None, None]
+        + np.arange(L)[None, :, None]
+        + np.arange(L)[None, None, :]
+    ) & 1
+    parity_sublattices = (parity_mask == 0, parity_mask == 1)
 
-    # Update each direction separately (vectorized over all sites)
+    # Checkerboard updates avoid simultaneous updates of neighboring links
+    # whose local actions are coupled via staples.
     for mu in range(3):
-        # Compute staples = sum of products completing plaquettes with U_mu
-        Staples = compute_staples_3d(U, mu)
-        Staples_dag = np.swapaxes(Staples.conj(), -1, -2)
+        for parity_mask in parity_sublattices:
+            # Recompute staples after each sublattice update.
+            Staples = compute_staples_3d(U, mu)
+            Staples_dag = np.swapaxes(Staples.conj(), -1, -2)
 
-        old_link = U[..., mu, :, :]
-        new_link = U_prime[..., mu, :, :]
+            old_link = U[..., mu, :, :]
+            R = random_SU2_updates((L, L, L), epsilon=epsilon_met)
+            new_link = R @ old_link
 
-        # ACTION CHANGE: dS = -(beta/2) * Re Tr[(U' - U) * Staples^dag]
-        # This is the key formula connecting the lattice action to sampling!
-        dS = -(beta/2.0) * np.real(np.trace((new_link - old_link) @ Staples_dag, axis1=-1, axis2=-2))
+            # ACTION CHANGE: dS = -(beta/2) * Re Tr[(U' - U) * Staples^dag]
+            dS = -(beta / 2.0) * np.real(
+                np.trace((new_link - old_link) @ Staples_dag, axis1=-1, axis2=-2)
+            )
 
-        # Metropolis accept/reject
-        accept_prob = np.exp(-dS)  # For dS < 0 (lower action), always accept
-        r = np.random.uniform(0, 1, dS.shape)
-        accept = r < accept_prob
-
-        # Update accepted links
-        U[..., mu, :, :][accept] = new_link[accept]
+            # Metropolis accept/reject on this checkerboard sublattice only.
+            accept_prob = np.minimum(1.0, np.exp(-dS))
+            r = np.random.uniform(0, 1, dS.shape)
+            accept = (r < accept_prob) & parity_mask
+            old_link[accept] = new_link[accept]
     return U
 
 # =============================================================================
@@ -431,7 +437,7 @@ def run_chain(args):
     n_ops = len(smear_levels)
     ops_history = np.zeros((n_meas_per_chain, n_ops, L))
     R_max, T_max = 6, 6
-    wilson_sum = np.zeros((R_max, T_max))
+    wilson_history = np.zeros((n_meas_per_chain, R_max, T_max))
 
     # =========================================================================
     # MEASUREMENT PHASE
@@ -470,7 +476,7 @@ def run_chain(args):
         U_hybrid[..., 0, :, :] = U_space_smeared[..., 0, :, :]  # Smeared x-links
         U_hybrid[..., 1, :, :] = U_space_smeared[..., 1, :, :]  # Smeared y-links
         # U_hybrid[..., 2, :, :] keeps original z-links (temporal direction)
-        wilson_sum += measure_wilson_loops_3d(U_hybrid, R_max, T_max)
+        wilson_history[i] = measure_wilson_loops_3d(U_hybrid, R_max, T_max)
 
         # Progress output every 50 measurements
         if (i + 1) % 50 == 0 or i == 0:
@@ -479,7 +485,7 @@ def run_chain(args):
             remaining = (n_meas_per_chain - i - 1) / rate if rate > 0 else 0
             print(f"  Chain {chain_id}: {i+1}/{n_meas_per_chain} measurements ({remaining/60:.1f} min left)", flush=True)
 
-    return chain_id, ops_history, wilson_sum
+    return chain_id, ops_history, wilson_history
 
 # =============================================================================
 # MAIN EXECUTION
@@ -497,22 +503,28 @@ if __name__ == '__main__':
     # equivalent to a single long chain (with better error properties since
     # different chains explore different regions of configuration space).
 
+    if n_meas < 1:
+        raise ValueError("n_meas must be >= 1")
+
     if n_chains is None:
         num_chains = max(1, cpu_count() - 1)  # Leave one core free
     else:
         num_chains = n_chains
+    num_chains = min(num_chains, n_meas)
 
-    # Distribute measurements evenly across chains
-    n_meas_per_chain = n_meas // num_chains
-    total_meas = n_meas_per_chain * num_chains
+    # Distribute measurements across chains, preserving total exactly.
+    base_count, remainder = divmod(n_meas, num_chains)
+    meas_counts = [base_count + (1 if i < remainder else 0) for i in range(num_chains)]
+    total_meas = int(np.sum(meas_counts))
 
-    print(f"Using {num_chains} parallel chains, {n_meas_per_chain} measurements each")
+    print(f"Using {num_chains} parallel chains")
+    print(f"Measurements/chain (min/max): {min(meas_counts)}/{max(meas_counts)}")
     print(f"Total measurements: {total_meas}")
     print(f"Parameters: L={L}, beta={beta}, n_therm={n_therm}, n_skip={n_skip}")
 
     # Each chain needs a unique random seed to ensure independence
     base_seed = int(time.time()) % 100000
-    chain_args = [(i, n_meas_per_chain, base_seed + i*1000) for i in range(num_chains)]
+    chain_args = [(i, meas_counts[i], base_seed + i * 1000) for i in range(num_chains)]
 
     # =========================================================================
     # RUN PARALLEL SIMULATION
@@ -536,17 +548,17 @@ if __name__ == '__main__':
     n_ops = len(smear_levels)
     ops_history_combined = np.zeros((total_meas, n_ops, L))
     R_max, T_max = 6, 6
-    wilson_sum_combined = np.zeros((R_max, T_max))
+    wilson_history_combined = np.zeros((total_meas, R_max, T_max))
 
     offset = 0
-    for chain_id, ops_history, wilson_sum in results:
+    for chain_id, ops_history, wilson_history in results:
         n_from_chain = ops_history.shape[0]
         ops_history_combined[offset:offset+n_from_chain] = ops_history
-        wilson_sum_combined += wilson_sum
+        wilson_history_combined[offset:offset+n_from_chain] = wilson_history
         offset += n_from_chain
         print(f"  Chain {chain_id}: collected {n_from_chain} measurements")
 
-    wilson_avg = wilson_sum_combined / total_meas
+    wilson_avg = np.mean(wilson_history_combined, axis=0)
 
     # =========================================================================
     # SAVE DATA
@@ -560,6 +572,7 @@ if __name__ == '__main__':
     print(f"Saving raw data to '{output_path}'...")
     np.savez(output_path,
              ops_history=ops_history_combined,
+             wilson_history=wilson_history_combined,
              wilson_avg=wilson_avg,
              beta=beta, L=L)
     print("Done. Use the analysis script to fit.")

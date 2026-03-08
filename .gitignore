@@ -90,3 +90,15 @@ Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds/
 Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds.ck/
 Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds.xml
 Bootstrap/ising3d/vendor/pycftboot/mixed_sanity_withbounds_out/
+
+# Bootstrap generated plots
+Bootstrap/ising3d_mixed/scan_results_*.png
+
+# MonteCarlo cluster local runtime artifacts
+MonteCarlo/cluster/results/
+MonteCarlo/cluster/slurm/logs/
+MonteCarlo/cluster/env.harvard
+MonteCarlo/cluster/env.harvard.scan
+
+# MonteCarlo generated error-plot snapshots
+MonteCarlo/latticeYM3d_errors_*.png
