@@ -102,6 +102,9 @@ def main() -> int:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
     except Exception as exc:
         raise SystemExit(
             "matplotlib is required for plotting. "
@@ -109,6 +112,8 @@ def main() -> int:
         ) from exc
 
     fig, ax = plt.subplots(figsize=(7.6, 5.4), dpi=160)
+    legend_handles: list[object] = []
+    legend_labels: list[str] = []
 
     if excluded_rows:
         x_ex = [float(r["delta_sigma"]) for r in excluded_rows]
@@ -116,12 +121,16 @@ def main() -> int:
         ax.scatter(
             x_ex,
             y_ex,
-            s=20,
+            s=12,
             marker="x",
             color="#c23b22",
-            alpha=0.75,
-            label=f"Excluded ({len(excluded_rows)})",
+            alpha=0.35,
+            linewidth=0.9,
         )
+        legend_handles.append(
+            Line2D([0], [0], marker="x", linestyle="None", markersize=6, color="#c23b22")
+        )
+        legend_labels.append(f"Excluded ({len(excluded_rows)})")
 
     if allowed_rows:
         x_al = [float(r["delta_sigma"]) for r in allowed_rows]
@@ -129,54 +138,126 @@ def main() -> int:
         ax.scatter(
             x_al,
             y_al,
-            s=26,
+            s=20,
             marker="o",
             facecolor="#1b8a5a",
             edgecolor="white",
             linewidth=0.5,
             alpha=0.9,
-            label=f"Allowed ({len(allowed_rows)})",
         )
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="None",
+                markersize=6,
+                markerfacecolor="#1b8a5a",
+                markeredgecolor="white",
+                markeredgewidth=0.6,
+                color="#1b8a5a",
+            )
+        )
+        legend_labels.append(f"Allowed ({len(allowed_rows)})")
 
-        # Draw a vertical-slice envelope: for each sigma value, shade between
-        # the min and max allowed epsilon. This approximates the island boundary.
-        by_sigma: dict[float, list[float]] = {}
-        for sx, ey in zip(x_al, y_al):
-            by_sigma.setdefault(sx, []).append(ey)
+        # Build a full (epsilon, sigma) grid and draw an allowed-region contour.
+        # This avoids the misleading "min-max envelope" fill when allowed bands
+        # are disconnected in epsilon for a fixed sigma.
+        sigma_vals = sorted({float(r["delta_sigma"]) for r in ok_rows})
+        epsilon_vals = sorted({float(r["delta_epsilon"]) for r in ok_rows})
+        sigma_to_i = {v: i for i, v in enumerate(sigma_vals)}
+        epsilon_to_i = {v: i for i, v in enumerate(epsilon_vals)}
 
-        sigmas = sorted(by_sigma)
-        if len(sigmas) >= 2:
-            lower = [min(by_sigma[s]) for s in sigmas]
-            upper = [max(by_sigma[s]) for s in sigmas]
-            ax.fill_between(sigmas, lower, upper, color="#1b8a5a", alpha=0.12, label="Allowed envelope")
+        z = np.full((len(epsilon_vals), len(sigma_vals)), np.nan, dtype=float)
+        for r in ok_rows:
+            sx = float(r["delta_sigma"])
+            ey = float(r["delta_epsilon"])
+            allowed_flag = parse_bool(r.get("allowed", ""))
+            if allowed_flag is None:
+                continue
+            z[epsilon_to_i[ey], sigma_to_i[sx]] = 1.0 if allowed_flag else 0.0
 
-    ax.set_xlabel("Delta_sigma")
-    ax.set_ylabel("Delta_epsilon (first Z2-even scalar)")
+        z_masked = np.ma.masked_invalid(z)
+        if np.isfinite(z).any():
+            ax.contourf(
+                sigma_vals,
+                epsilon_vals,
+                z_masked,
+                levels=[0.5, 1.5],
+                colors=["#1b8a5a"],
+                alpha=0.12,
+                antialiased=True,
+            )
+            ax.contour(
+                sigma_vals,
+                epsilon_vals,
+                z_masked,
+                levels=[0.5],
+                colors=["#1b8a5a"],
+                linewidths=1.4,
+                alpha=0.95,
+            )
+            legend_handles.append(Patch(facecolor="#1b8a5a", alpha=0.12, edgecolor="#1b8a5a"))
+            legend_labels.append("Allowed region")
+
+    ax.set_xlabel(r"$\Delta_{\sigma}$")
+    ax.set_ylabel(r"$\Delta_{\epsilon}$ (first $Z_2$-even scalar)")
     ax.set_title(args.title)
-    ax.grid(True, alpha=0.25)
+    ax.grid(True, alpha=0.20)
+    ax.set_axisbelow(True)
 
+    annotation_lines: list[str] = []
     if metadata and isinstance(metadata, dict):
         cfg = metadata.get("config", {})
         if isinstance(cfg, dict):
-            try:
-                text = (
-                    f"k={cfg.get('k_max')} l={cfg.get('l_max')} m={cfg.get('m_max')} n={cfg.get('n_max')}"
-                    f" | cutoff={cfg.get('cutoff')} | dim={cfg.get('dim')}"
+            k = cfg.get("k_max")
+            l = cfg.get("l_max")
+            m = cfg.get("m_max")
+            n = cfg.get("n_max")
+            cutoff = cfg.get("cutoff")
+            dim = cfg.get("dim")
+            values = [k, l, m, n, cutoff, dim]
+            if all(v is not None for v in values):
+                annotation_lines.append(
+                    f"k={k}  l={l}  m={m}  n={n}  cutoff={cutoff}  dim={dim}"
                 )
-                ax.text(
-                    0.02,
-                    0.98,
-                    text,
-                    transform=ax.transAxes,
-                    va="top",
-                    ha="left",
-                    fontsize=9,
-                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.82, edgecolor="#999999"),
+        summary = metadata.get("summary", {})
+        if isinstance(summary, dict):
+            total = summary.get("total_points")
+            allowed = summary.get("allowed_points")
+            excluded = summary.get("excluded_points")
+            errors = summary.get("error_points")
+            values = [total, allowed, excluded, errors]
+            if all(v is not None for v in values):
+                annotation_lines.append(
+                    f"total={total}  allowed={allowed}  excluded={excluded}  errors={errors}"
                 )
-            except Exception:
-                pass
 
-    ax.legend(loc="best")
+    if annotation_lines:
+        ax.text(
+            0.015,
+            0.985,
+            "\n".join(annotation_lines),
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=8.5,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.86, edgecolor="#999999"),
+        )
+
+    if legend_handles:
+        ax.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper left",
+            frameon=True,
+            framealpha=0.9,
+            facecolor="white",
+            edgecolor="#bbbbbb",
+        )
+
+    # Keep small margins so boundary points are not clipped.
+    ax.margins(x=0.02, y=0.02)
     fig.tight_layout()
 
     png_path = out_prefix.with_suffix(".png")

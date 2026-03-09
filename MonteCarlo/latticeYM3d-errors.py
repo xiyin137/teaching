@@ -47,6 +47,20 @@ GEVP_T0 = int(os.environ.get("YM_GEVP_T0", "0"))
 if GEVP_T0 < 0:
     raise ValueError("YM_GEVP_T0 must be >= 0")
 
+# Runtime controls for expensive resampling sections.
+PLAQ_BOOTSTRAP_SAMPLES = int(os.environ.get("YM_PLAQ_BOOTSTRAP_SAMPLES", "1000"))
+PHYSICS_BOOTSTRAP_SAMPLES = int(os.environ.get("YM_PHYSICS_BOOTSTRAP_SAMPLES", "200"))
+PHYSICS_BOOTSTRAP_STRIDE = int(os.environ.get("YM_PHYSICS_BOOTSTRAP_STRIDE", "1"))
+PHYSICS_BOOTSTRAP_CFG_LIMIT = int(os.environ.get("YM_PHYSICS_BOOTSTRAP_CFG_LIMIT", "0"))
+if PLAQ_BOOTSTRAP_SAMPLES < 10:
+    raise ValueError("YM_PLAQ_BOOTSTRAP_SAMPLES must be >= 10")
+if PHYSICS_BOOTSTRAP_SAMPLES < 10:
+    raise ValueError("YM_PHYSICS_BOOTSTRAP_SAMPLES must be >= 10")
+if PHYSICS_BOOTSTRAP_STRIDE < 1:
+    raise ValueError("YM_PHYSICS_BOOTSTRAP_STRIDE must be >= 1")
+if PHYSICS_BOOTSTRAP_CFG_LIMIT < 0:
+    raise ValueError("YM_PHYSICS_BOOTSTRAP_CFG_LIMIT must be >= 0")
+
 n_meas, n_ops, Nt = ops_history.shape
 print(f"Loaded Data: Beta={beta}, L={L}, Configs={n_meas}")
 print(f"GEVP reference time t0 = {GEVP_T0}")
@@ -207,7 +221,11 @@ print(f"\n--- BLOCK RESAMPLING SETUP ---")
 print(f"Block size: {block_size} measurements")
 print(f"Number of blocks: {max(1, n_meas // max(1, block_size))}")
 
-resamp_mean, resamp_err, _ = block_bootstrap_stat(plaq_timeseries, block_size, n_samples=1000)
+resamp_mean, resamp_err, _ = block_bootstrap_stat(
+    plaq_timeseries,
+    block_size,
+    n_samples=PLAQ_BOOTSTRAP_SAMPLES,
+)
 print(f"\n--- BLOCK BOOTSTRAP ANALYSIS ---")
 print(f"Mean plaquette: {resamp_mean:.6f} +/- {resamp_err:.6f}")
 
@@ -295,8 +313,9 @@ def block_bootstrap_physics(ops_history, wilson_history, block_size, n_samples=2
     sigma_samples = []
     ratio_samples = []
     n_cfg = ops_history.shape[0]
+    progress_step = max(1, n_samples // 10)
 
-    for _ in range(n_samples):
+    for i in range(n_samples):
         idx = block_bootstrap_indices(n_cfg, block_size)
         ops_resamp = ops_history[idx]
 
@@ -314,13 +333,36 @@ def block_bootstrap_physics(ops_history, wilson_history, block_size, n_samples=2
         if np.isfinite(mass) and np.isfinite(sigma) and sigma > 0:
             ratio_samples.append(mass / np.sqrt(sigma))
 
+        if (i + 1) % progress_step == 0 or i == 0 or (i + 1) == n_samples:
+            print(f"  bootstrap progress: {i + 1}/{n_samples}", flush=True)
+
     return np.array(mass_samples), np.array(sigma_samples), np.array(ratio_samples)
 
 print(f"\n--- GEVP MASS + STRING TENSION WITH BLOCK BOOTSTRAP ---")
 print("Running block bootstrap (this may take a moment)...")
 
+# Optional downsampling only for the expensive physics bootstrap.
+ops_phys = ops_history[::PHYSICS_BOOTSTRAP_STRIDE]
+wilson_phys = wilson_history[::PHYSICS_BOOTSTRAP_STRIDE] if wilson_history is not None else None
+if PHYSICS_BOOTSTRAP_CFG_LIMIT > 0 and ops_phys.shape[0] > PHYSICS_BOOTSTRAP_CFG_LIMIT:
+    step = int(np.ceil(ops_phys.shape[0] / PHYSICS_BOOTSTRAP_CFG_LIMIT))
+    ops_phys = ops_phys[::step]
+    wilson_phys = wilson_phys[::step] if wilson_phys is not None else None
+
+# Keep at least ~4 blocks after any downsampling.
+phys_block_size = max(1, int(np.ceil(block_size / PHYSICS_BOOTSTRAP_STRIDE)))
+if ops_phys.shape[0] // phys_block_size < 4:
+    phys_block_size = max(1, ops_phys.shape[0] // 4)
+
+print(f"Physics bootstrap configs used: {ops_phys.shape[0]}")
+print(f"Physics bootstrap block size: {phys_block_size}")
+print(f"Physics bootstrap samples: {PHYSICS_BOOTSTRAP_SAMPLES}")
+
 mass_samples, sigma_samples, ratio_samples = block_bootstrap_physics(
-    ops_history, wilson_history, block_size, n_samples=200
+    ops_phys,
+    wilson_phys,
+    phys_block_size,
+    n_samples=PHYSICS_BOOTSTRAP_SAMPLES,
 )
 
 mass_resamp = np.mean(mass_samples) if len(mass_samples) > 10 else np.nan
